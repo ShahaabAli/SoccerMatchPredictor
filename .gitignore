@@ -1,6 +1,0 @@
-# Ignore the archive.zip file
-archive.zip
-
-# Ignore the archive folder and its contents
-archive/
-archive/database.sqlite
