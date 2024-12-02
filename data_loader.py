@@ -1,93 +1,106 @@
-import zipfile
 import sqlite3
 import pandas as pd
 import kagglehub
 
-# Loads and processes data
-# Returns two dataframes
-# One for Match Data
-# One for Team Data
 def load_data():
+    # Download dataset
     path = kagglehub.dataset_download("hugomathien/soccer")
 
     # Connect to the SQLite database
     db_path = f'{path}/database.sqlite'
     conn = sqlite3.connect(db_path)
 
-    # Query data from the database into dataframe
+    # Query data from the database
     team_attributes_df = pd.read_sql("SELECT * FROM Team_Attributes;", conn)
     matches_df = pd.read_sql("SELECT * FROM Match;", conn)
-    league_df = pd.read_sql("SELECT * FROM League;", conn)
     team_df = pd.read_sql("SELECT * FROM Team;", conn)
 
-    # Filter for matches in the England Premier League
-    england_league_id = league_df[league_df['name'] == 'England Premier League']['id'].values[0]
-    england_matches_df = matches_df[matches_df['league_id'] == england_league_id].copy()
+    # Convert `date` column to datetime in both DataFrames
+    team_attributes_df['date'] = pd.to_datetime(team_attributes_df['date'], errors='coerce')
+    matches_df['date'] = pd.to_datetime(matches_df['date'], errors='coerce')
 
-    # Add year column to the matches dataframe from date column
-    england_matches_df['year'] = pd.to_datetime(england_matches_df['date']).dt.year
+    # Add year column to `Team_Attributes` and `Match` DataFrames
+    team_attributes_df['year'] = team_attributes_df['date'].dt.year
+    matches_df['year'] = matches_df['date'].dt.year
 
-    # Add a 'result' column based on home and away team goals
-    def calculate_result(row):
-        if row['home_team_goal'] > row['away_team_goal']:
-            return 1 # Home win
-        elif row['home_team_goal'] < row['away_team_goal']:
-            return -1 # Home loss
-        else:
-            return 0 # Draw
+    # Keep desired features and retain `team_api_id` and `year` for merging
+    selected_features = [
+        'buildUpPlaySpeed', 'buildUpPlaySpeedClass', 'buildUpPlayDribbling',
+        'buildUpPlayDribblingClass', 'buildUpPlayPassing', 'buildUpPlayPassingClass',
+        'buildUpPlayPositioningClass', 'chanceCreationPassing', 'chanceCreationPassingClass',
+        'chanceCreationCrossing', 'chanceCreationCrossingClass', 'chanceCreationShooting',
+        'chanceCreationShootingClass', 'chanceCreationPositioningClass', 'defencePressure',
+        'defencePressureClass', 'defenceAggression', 'defenceAggressionClass',
+        'defenceTeamWidth', 'defenceTeamWidthClass', 'defenceDefenderLineClass'
+    ]
+    team_attributes_df = team_attributes_df[['team_api_id', 'year'] + selected_features]
 
-    england_matches_df['result'] = england_matches_df.apply(calculate_result, axis=1)  # Apply previous function to each row
-
-    # Replace home team IDs with home team names
-    england_matches_df = england_matches_df.merge(
-        team_df[['team_api_id', 'team_long_name']], 
-        how='left', 
-        left_on='home_team_api_id', 
-        right_on='team_api_id'
-    ).rename(columns={'team_long_name': 'home_team_name'})
-
-    # Replace away team IDs with away team names
-    england_matches_df = england_matches_df.merge(
-        team_df[['team_api_id', 'team_long_name']], 
-        how='left', 
-        left_on='away_team_api_id', 
-        right_on='team_api_id'
-    ).rename(columns={'team_long_name': 'away_team_name'})
-
-    # Drop unnecessary columns
-    england_matches_df = england_matches_df[['home_team_name', 'away_team_name', 'year', 'result']]
-
-    # Filter team attributes to include only Premier League teams
-    premier_league_team_names = pd.concat([
-        england_matches_df['home_team_name'], 
-        england_matches_df['away_team_name']
-    ]).unique()
-
+    # Add `team_long_name` from `team_df`
     team_attributes_df = team_attributes_df.merge(
         team_df[['team_api_id', 'team_long_name']],
-        how='left',
-        on='team_api_id'
+        on='team_api_id',
+        how='left'
     )
 
-    # Filter by year and team names
-    team_attributes_df['year'] = pd.to_datetime(team_attributes_df['date']).dt.year
-    team_attributes_df = team_attributes_df[
-        (team_attributes_df['year'].isin([2014, 2015, 2016, 2017])) & 
-        (team_attributes_df['team_long_name'].isin(premier_league_team_names))
-    ]
+    # Merge team attributes for home team
+    home_attributes = team_attributes_df.rename(
+        columns=lambda x: f'home_{x}' if x not in ['team_api_id', 'year'] else x
+    )
+    matches_df = matches_df.merge(
+        home_attributes,
+        how='left',
+        left_on=['home_team_api_id', 'year'],
+        right_on=['team_api_id', 'year']
+    ).drop(columns=['team_api_id'])
 
-    # Drop unnecessary columns
-    team_attributes_df = team_attributes_df.drop(columns=['id', 'team_fifa_api_id', 'team_api_id'])
-    team_attributes_df = team_attributes_df[['team_long_name'] + team_attributes_df.select_dtypes(include='number').columns.tolist()]
+    # Merge team attributes for away team
+    away_attributes = team_attributes_df.rename(
+        columns=lambda x: f'away_{x}' if x not in ['team_api_id', 'year'] else x
+    )
+    matches_df = matches_df.merge(
+        away_attributes,
+        how='left',
+        left_on=['away_team_api_id', 'year'],
+        right_on=['team_api_id', 'year']
+    ).drop(columns=['team_api_id'])
 
-    # Print the dataframes
-    print("Team Attributes:")
-    print(team_attributes_df.head())
+    # Add a 'result' column to `matches_df` based on the match outcome
+    def calculate_result(row):
+        if row['home_team_goal'] > row['away_team_goal']:
+            return 2  # Home win
+        elif row['home_team_goal'] < row['away_team_goal']:
+            return 1  # Away win
+        else:
+            return 0  # Draw
 
-    print()
-    print("England Premier League Matches:")
-    print(england_matches_df.head())
+    matches_df['result'] = matches_df.apply(calculate_result, axis=1)
 
+    # Reorder columns: home first, then away
+    ordered_columns = (
+        [f'home_{col}' for col in selected_features] +
+        [f'away_{col}' for col in selected_features]
+    )
+    matches_df = matches_df[ordered_columns + ['result']]
+
+    # Drop rows with null values
+    matches_df = matches_df.dropna()
+
+    # One-hot encode categorical features (columns ending with 'Class')
+    categorical_columns = [col for col in matches_df.columns if col.endswith('Class')]
+    matches_df = pd.get_dummies(matches_df, columns=categorical_columns, drop_first=True)
+
+    # Ensure 'result' is the last column
+    result_column = matches_df.pop('result')
+    matches_df['result'] = result_column
+
+    # Close the database connection
     conn.close()
 
-    return team_attributes_df, england_matches_df
+    # Save processed DataFrame to a CSV file for verification
+    matches_df.to_csv('test.csv', index=False)
+
+    # Print the first few rows of the processed DataFrame
+    print("Processed Matches DataFrame:")
+    print(matches_df.head())
+
+    return matches_df
