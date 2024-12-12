@@ -11,41 +11,25 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 from data_loader import load_data  # Assuming `data_loader.py` contains the `load_data` function
+from tensorflow.keras.layers import BatchNormalization
+from tensorflow.keras.regularizers import l2
 
-# Load and preprocess the data
-def preprocess_data():
-    # Load the processed data
-    matches_df = load_data()
-
-    # Feature engineering
-    matches_df['stat_diff'] = matches_df['home_buildUpPlayPassing'] - matches_df['away_buildUpPlayPassing']
-    matches_df['chance_creation_diff'] = matches_df['home_chanceCreationPassing'] - matches_df['away_chanceCreationPassing']
-
-    # Remove rows with invalid target values
-    valid_classes = [0, 1, 2]  # Define the valid classes
-    matches_df = matches_df[matches_df['result'].isin(valid_classes)]
-
-    # Separate features (X) and target (y)
-    X = matches_df.drop(columns=['result'])  # Drop the target column
-    y = matches_df['result']  # Target column
-
-    # Scale the features for better neural network performance
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    return train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-
-# Define the neural network model
-def create_model(input_dim):
+# Define the updated neural network model
+def create_improved_model(input_dim):
     model = Sequential([
-        Dense(512, activation='relu', input_shape=(input_dim,)),
-        Dropout(0.2),
-        Dense(256, activation='relu'),
-        Dropout(0.2),
-        Dense(128, activation='relu'),
-        Dropout(0.2),
-        Dense(16, activation='relu'),
-        Dense(3)  # Output layer without activation
+        Dense(512, activation='relu', input_shape=(input_dim,), kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(256, activation='relu', kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(128, activation='relu', kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(64, activation='relu', kernel_regularizer=l2(1e-4)),
+        BatchNormalization(),
+        Dropout(0.3),
+        Dense(3)  # Output layer with logits
     ])
 
     # Compile the model
@@ -56,6 +40,30 @@ def create_model(input_dim):
     )
 
     return model
+
+# Updated preprocess_data function for improved feature engineering
+def preprocess_data():
+    matches_df = load_data()
+
+    # Feature engineering
+    matches_df['stat_diff'] = matches_df['home_buildUpPlayPassing'] - matches_df['away_buildUpPlayPassing']
+    matches_df['chance_creation_diff'] = matches_df['home_chanceCreationPassing'] - matches_df['away_chanceCreationPassing']
+    matches_df['goal_difference'] = matches_df['home_avg_goal_diff'] - matches_df['away_avg_goal_diff']
+    matches_df['win_percentage_diff'] = matches_df['home_win_percentage'] - matches_df['away_win_percentage']
+
+    # Remove rows with invalid target values
+    valid_classes = [0, 1, 2]
+    matches_df = matches_df[matches_df['result'].isin(valid_classes)]
+
+    # Separate features and target
+    X = matches_df.drop(columns=['result'])
+    y = matches_df['result']
+
+    # Scale the features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    return train_test_split(X_scaled, y, test_size=0.2, random_state=42)
 
 # Plot learning curve and save the graphs
 def plot_learning_curve(history, output_dir="plots"):
@@ -84,6 +92,43 @@ def plot_learning_curve(history, output_dir="plots"):
     plt.savefig(os.path.join(output_dir, "learning_curve_accuracy.png"))
     plt.close()
 
+# Plot Class Distribution
+def plot_class_distribution(y, output_dir="plots"):
+    os.makedirs(output_dir, exist_ok=True)
+    plt.figure(figsize=(8, 6))
+    classes, counts = np.unique(y, return_counts=True)
+    plt.bar(classes, counts, alpha=0.7, color='blue')
+    plt.xlabel('Class')
+    plt.ylabel('Count')
+    plt.title('Class Distribution')
+    plt.xticks(classes)
+    plt.savefig(os.path.join(output_dir, "class_distribution.png"))
+    plt.close()
+
+from sklearn.metrics import precision_recall_fscore_support
+
+# Plot Precision, Recall, F1-Score
+def plot_precision_recall_f1(y_true, y_pred, output_dir="plots"):
+    os.makedirs(output_dir, exist_ok=True)
+    precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average=None)
+    classes = np.unique(y_true)
+
+    plt.figure(figsize=(12, 6))
+    x = np.arange(len(classes))
+    width = 0.3  # Bar width
+
+    plt.bar(x - width, precision, width, label='Precision', alpha=0.7)
+    plt.bar(x, recall, width, label='Recall', alpha=0.7)
+    plt.bar(x + width, f1, width, label='F1-Score', alpha=0.7)
+
+    plt.xlabel('Class')
+    plt.ylabel('Score')
+    plt.title('Precision, Recall, and F1-Score by Class')
+    plt.xticks(x, labels=classes)
+    plt.legend()
+    plt.savefig(os.path.join(output_dir, "precision_recall_f1.png"))
+    plt.close()
+
 # Save confusion matrix
 def save_confusion_matrix(cm, class_labels, output_dir="plots"):
     os.makedirs(output_dir, exist_ok=True)
@@ -93,47 +138,44 @@ def save_confusion_matrix(cm, class_labels, output_dir="plots"):
     plt.savefig(os.path.join(output_dir, "confusion_matrix.png"))
     plt.close()
 
-# Train the model
-def train_model(output_dir="plots"):
-    # Preprocess data
+def train_improved_model(output_dir="plots"):
     X_train, X_test, y_train, y_test = preprocess_data()
 
-    # Compute class weights to handle imbalanced data
+    # Plot Class Distribution
+    plot_class_distribution(y_train, output_dir=output_dir)
+
     class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
     class_weights_dict = {i: weight for i, weight in enumerate(class_weights)}
 
-    # Create the model
     input_dim = X_train.shape[1]
-    model = create_model(input_dim)
+    model = create_improved_model(input_dim)
 
-    # Add callbacks
     early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
     reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6)
 
-    # Train the model and save the history
     history = model.fit(
         X_train, y_train,
         epochs=1000,
-        batch_size=512,
+        batch_size=256,
         validation_split=0.2,
         callbacks=[early_stopping, reduce_lr],
         class_weight=class_weights_dict
     )
 
-    # Save learning curves
     plot_learning_curve(history, output_dir=output_dir)
 
-    # Evaluate the model
     test_loss, test_accuracy = model.evaluate(X_test, y_test)
     print(f"Test Accuracy: {test_accuracy:.2f}")
 
-    # Predict on test data
     y_pred = model.predict(X_test)
     y_pred_classes = np.argmax(y_pred, axis=1)
 
-    # Generate and save confusion matrix
+    # Generate and save Confusion Matrix
     cm = confusion_matrix(y_test, y_pred_classes)
     save_confusion_matrix(cm, class_labels=np.unique(y_test), output_dir=output_dir)
 
+    # Plot Precision, Recall, and F1-Score
+    plot_precision_recall_f1(y_test, y_pred_classes, output_dir=output_dir)
+
 if __name__ == '__main__':
-    train_model()
+    train_improved_model()

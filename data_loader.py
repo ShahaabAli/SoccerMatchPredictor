@@ -42,6 +42,59 @@ def load_data():
         how='left'
     )
 
+    # Calculate historical stats: win percentage and average goal difference
+    team_stats = {}
+
+    def update_stats(row):
+        home_team = row['home_team_api_id']
+        away_team = row['away_team_api_id']
+        home_goals = row['home_team_goal']
+        away_goals = row['away_team_goal']
+
+        # Initialize stats if not present
+        if home_team not in team_stats:
+            team_stats[home_team] = {'wins': 0, 'matches': 0, 'goal_diff': 0}
+        if away_team not in team_stats:
+            team_stats[away_team] = {'wins': 0, 'matches': 0, 'goal_diff': 0}
+
+        # Update home team stats
+        team_stats[home_team]['matches'] += 1
+        team_stats[home_team]['goal_diff'] += home_goals - away_goals
+        if home_goals > away_goals:
+            team_stats[home_team]['wins'] += 1
+
+        # Update away team stats
+        team_stats[away_team]['matches'] += 1
+        team_stats[away_team]['goal_diff'] += away_goals - home_goals
+        if away_goals > home_goals:
+            team_stats[away_team]['wins'] += 1
+
+    matches_df.apply(update_stats, axis=1)
+
+    # Add new features for win percentage and average goal difference
+    def add_features(row):
+        home_team = row['home_team_api_id']
+        away_team = row['away_team_api_id']
+
+        home_stats = team_stats[home_team]
+        away_stats = team_stats[away_team]
+
+        row['home_win_percentage'] = (
+            home_stats['wins'] / home_stats['matches'] if home_stats['matches'] > 0 else 0
+        )
+        row['away_win_percentage'] = (
+            away_stats['wins'] / away_stats['matches'] if away_stats['matches'] > 0 else 0
+        )
+        row['home_avg_goal_diff'] = (
+            home_stats['goal_diff'] / home_stats['matches'] if home_stats['matches'] > 0 else 0
+        )
+        row['away_avg_goal_diff'] = (
+            away_stats['goal_diff'] / away_stats['matches'] if away_stats['matches'] > 0 else 0
+        )
+        return row
+
+    matches_df = matches_df.apply(add_features, axis=1)
+
     # Merge team attributes for home team
     home_attributes = team_attributes_df.rename(
         columns=lambda x: f'home_{x}' if x not in ['team_api_id', 'year'] else x
@@ -78,7 +131,8 @@ def load_data():
     # Reorder columns: home first, then away
     ordered_columns = (
         [f'home_{col}' for col in selected_features] +
-        [f'away_{col}' for col in selected_features]
+        [f'away_{col}' for col in selected_features] +
+        ['home_win_percentage', 'away_win_percentage', 'home_avg_goal_diff', 'away_avg_goal_diff']
     )
     matches_df = matches_df[ordered_columns + ['result']]
 
