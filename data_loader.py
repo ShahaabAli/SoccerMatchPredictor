@@ -95,6 +95,12 @@ def load_data():
     categorical_cols = [col for col in matches.columns if col.endswith('Class')]
     matches = pd.get_dummies(matches, columns=categorical_cols, drop_first=True)
 
+    # Additional Feature Engineering
+    matches['stat_diff'] = matches['home_buildUpPlayPassing'] - matches['away_buildUpPlayPassing']
+    matches['chance_creation_diff'] = matches['home_chanceCreationPassing'] - matches['away_chanceCreationPassing']
+    matches['goal_difference'] = matches['home_avg_goal_diff'] - matches['away_avg_goal_diff']
+    matches['win_percentage_diff'] = matches['home_win_percentage'] - matches['away_win_percentage']
+
     # Move target column to the end
     result_col = matches.pop('result')
     matches['result'] = result_col
