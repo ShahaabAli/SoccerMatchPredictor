@@ -3,28 +3,23 @@ import pandas as pd
 import kagglehub
 
 def load_data():
-    # Download dataset
+    # Download dataset and connect to SQLite database
     path = kagglehub.dataset_download("hugomathien/soccer")
+    conn = sqlite3.connect(f'{path}/database.sqlite')
 
-    # Connect to the SQLite database
-    db_path = f'{path}/database.sqlite'
-    conn = sqlite3.connect(db_path)
+    # Load tables into DataFrames
+    team_attributes = pd.read_sql("SELECT * FROM Team_Attributes;", conn)
+    matches = pd.read_sql("SELECT * FROM Match;", conn)
+    teams = pd.read_sql("SELECT * FROM Team;", conn)
 
-    # Query data from the database
-    team_attributes_df = pd.read_sql("SELECT * FROM Team_Attributes;", conn)
-    matches_df = pd.read_sql("SELECT * FROM Match;", conn)
-    team_df = pd.read_sql("SELECT * FROM Team;", conn)
+    # Add year column to prepare for merging and analysis
+    team_attributes['date'] = pd.to_datetime(team_attributes['date'], errors='coerce')
+    matches['date'] = pd.to_datetime(matches['date'], errors='coerce')
+    team_attributes['year'] = team_attributes['date'].dt.year
+    matches['year'] = matches['date'].dt.year
 
-    # Convert `date` column to datetime in both DataFrames
-    team_attributes_df['date'] = pd.to_datetime(team_attributes_df['date'], errors='coerce')
-    matches_df['date'] = pd.to_datetime(matches_df['date'], errors='coerce')
-
-    # Add year column to `Team_Attributes` and `Match` DataFrames
-    team_attributes_df['year'] = team_attributes_df['date'].dt.year
-    matches_df['year'] = matches_df['date'].dt.year
-
-    # Keep desired features and retain `team_api_id` and `year` for merging
-    selected_features = [
+    # Select and merge relevant team attributes
+    features = [
         'buildUpPlaySpeed', 'buildUpPlaySpeedClass', 'buildUpPlayDribbling',
         'buildUpPlayDribblingClass', 'buildUpPlayPassing', 'buildUpPlayPassingClass',
         'buildUpPlayPositioningClass', 'chanceCreationPassing', 'chanceCreationPassingClass',
@@ -33,128 +28,77 @@ def load_data():
         'defencePressureClass', 'defenceAggression', 'defenceAggressionClass',
         'defenceTeamWidth', 'defenceTeamWidthClass', 'defenceDefenderLineClass'
     ]
-    team_attributes_df = team_attributes_df[['team_api_id', 'year'] + selected_features]
-
-    # Add `team_long_name` from `team_df`
-    team_attributes_df = team_attributes_df.merge(
-        team_df[['team_api_id', 'team_long_name']],
-        on='team_api_id',
-        how='left'
+    team_attributes = team_attributes[['team_api_id', 'year'] + features]
+    team_attributes = team_attributes.merge(
+        teams[['team_api_id', 'team_long_name']], on='team_api_id', how='left'
     )
 
-    # Calculate historical stats: win percentage and average goal difference
+    # Calculate historical stats (win percentage, average goal difference)
     team_stats = {}
 
     def update_stats(row):
-        home_team = row['home_team_api_id']
-        away_team = row['away_team_api_id']
-        home_goals = row['home_team_goal']
-        away_goals = row['away_team_goal']
+        for team, goals, opponent_goals in [
+            (row['home_team_api_id'], row['home_team_goal'], row['away_team_goal']),
+            (row['away_team_api_id'], row['away_team_goal'], row['home_team_goal'])
+        ]:
+            if team not in team_stats:
+                team_stats[team] = {'wins': 0, 'matches': 0, 'goal_diff': 0}
+            team_stats[team]['matches'] += 1
+            team_stats[team]['goal_diff'] += goals - opponent_goals
+            if goals > opponent_goals:
+                team_stats[team]['wins'] += 1
 
-        # Initialize stats if not present
-        if home_team not in team_stats:
-            team_stats[home_team] = {'wins': 0, 'matches': 0, 'goal_diff': 0}
-        if away_team not in team_stats:
-            team_stats[away_team] = {'wins': 0, 'matches': 0, 'goal_diff': 0}
+    matches.apply(update_stats, axis=1)
 
-        # Update home team stats
-        team_stats[home_team]['matches'] += 1
-        team_stats[home_team]['goal_diff'] += home_goals - away_goals
-        if home_goals > away_goals:
-            team_stats[home_team]['wins'] += 1
-
-        # Update away team stats
-        team_stats[away_team]['matches'] += 1
-        team_stats[away_team]['goal_diff'] += away_goals - home_goals
-        if away_goals > home_goals:
-            team_stats[away_team]['wins'] += 1
-
-    matches_df.apply(update_stats, axis=1)
-
-    # Add new features for win percentage and average goal difference
     def add_features(row):
-        home_team = row['home_team_api_id']
-        away_team = row['away_team_api_id']
-
-        home_stats = team_stats[home_team]
-        away_stats = team_stats[away_team]
-
-        row['home_win_percentage'] = (
-            home_stats['wins'] / home_stats['matches'] if home_stats['matches'] > 0 else 0
-        )
-        row['away_win_percentage'] = (
-            away_stats['wins'] / away_stats['matches'] if away_stats['matches'] > 0 else 0
-        )
-        row['home_avg_goal_diff'] = (
-            home_stats['goal_diff'] / home_stats['matches'] if home_stats['matches'] > 0 else 0
-        )
-        row['away_avg_goal_diff'] = (
-            away_stats['goal_diff'] / away_stats['matches'] if away_stats['matches'] > 0 else 0
-        )
+        home = team_stats[row['home_team_api_id']]
+        away = team_stats[row['away_team_api_id']]
+        row['home_win_percentage'] = home['wins'] / home['matches'] if home['matches'] > 0 else 0
+        row['away_win_percentage'] = away['wins'] / away['matches'] if away['matches'] > 0 else 0
+        row['home_avg_goal_diff'] = home['goal_diff'] / home['matches'] if home['matches'] > 0 else 0
+        row['away_avg_goal_diff'] = away['goal_diff'] / away['matches'] if away['matches'] > 0 else 0
         return row
 
-    matches_df = matches_df.apply(add_features, axis=1)
+    matches = matches.apply(add_features, axis=1)
 
-    # Merge team attributes for home team
-    home_attributes = team_attributes_df.rename(
+    # Merge team attributes for home and away teams
+    home_attrs = team_attributes.rename(
         columns=lambda x: f'home_{x}' if x not in ['team_api_id', 'year'] else x
     )
-    matches_df = matches_df.merge(
-        home_attributes,
-        how='left',
-        left_on=['home_team_api_id', 'year'],
-        right_on=['team_api_id', 'year']
+    matches = matches.merge(
+        home_attrs, how='left', left_on=['home_team_api_id', 'year'], right_on=['team_api_id', 'year']
     ).drop(columns=['team_api_id'])
 
-    # Merge team attributes for away team
-    away_attributes = team_attributes_df.rename(
+    away_attrs = team_attributes.rename(
         columns=lambda x: f'away_{x}' if x not in ['team_api_id', 'year'] else x
     )
-    matches_df = matches_df.merge(
-        away_attributes,
-        how='left',
-        left_on=['away_team_api_id', 'year'],
-        right_on=['team_api_id', 'year']
+    matches = matches.merge(
+        away_attrs, how='left', left_on=['away_team_api_id', 'year'], right_on=['team_api_id', 'year']
     ).drop(columns=['team_api_id'])
 
-    # Add a 'result' column to `matches_df` based on the match outcome
-    def calculate_result(row):
-        if row['home_team_goal'] > row['away_team_goal']:
-            return 2  # Home win
-        elif row['home_team_goal'] < row['away_team_goal']:
-            return 1  # Away win
-        else:
-            return 0  # Draw
+    # Create target column for match outcomes
+    matches['result'] = matches.apply(
+        lambda row: 2 if row['home_team_goal'] > row['away_team_goal'] else 
+                    (1 if row['home_team_goal'] < row['away_team_goal'] else 0),
+        axis=1
+    )
 
-    matches_df['result'] = matches_df.apply(calculate_result, axis=1)
-
-    # Reorder columns: home first, then away
+    # Reorganize columns and clean up the final dataset
     ordered_columns = (
-        [f'home_{col}' for col in selected_features] +
-        [f'away_{col}' for col in selected_features] +
+        [f'home_{col}' for col in features] +
+        [f'away_{col}' for col in features] +
         ['home_win_percentage', 'away_win_percentage', 'home_avg_goal_diff', 'away_avg_goal_diff']
     )
-    matches_df = matches_df[ordered_columns + ['result']]
+    matches = matches[ordered_columns + ['result']].dropna()
 
-    # Drop rows with null values
-    matches_df = matches_df.dropna()
+    # One-hot encode categorical features
+    categorical_cols = [col for col in matches.columns if col.endswith('Class')]
+    matches = pd.get_dummies(matches, columns=categorical_cols, drop_first=True)
 
-    # One-hot encode categorical features (columns ending with 'Class')
-    categorical_columns = [col for col in matches_df.columns if col.endswith('Class')]
-    matches_df = pd.get_dummies(matches_df, columns=categorical_columns, drop_first=True)
+    # Move target column to the end
+    result_col = matches.pop('result')
+    matches['result'] = result_col
 
-    # Ensure 'result' is the last column
-    result_column = matches_df.pop('result')
-    matches_df['result'] = result_column
-
-    # Close the database connection
     conn.close()
-
-    # Save processed DataFrame to a CSV file for verification
-    matches_df.to_csv('test.csv', index=False)
-
-    # Print the first few rows of the processed DataFrame
-    print("Processed Matches DataFrame:")
-    print(matches_df.head())
-
-    return matches_df
+    matches.to_csv('matches.csv', index=False)
+    return matches
